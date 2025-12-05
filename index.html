@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WiFi RC Controller</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem;
+    }
+    .row {
+      display: flex;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .panel {
+      border: 1px solid #444;
+      border-radius: 8px;
+      padding: 1rem;
+      min-width: 220px;
+      background: #222;
+    }
+    .panel h2 {
+      margin-top: 0;
+      font-size: 1.1rem;
+    }
+    label {
+      display: block;
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+    }
+    input[type="range"] {
+      width: 100%;
+    }
+    button {
+      padding: 0.4rem 0.8rem;
+      margin: 0.2rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+    }
+    #connectBtn { background: #2a6; }
+    #armBtn { background: #28a; }
+    #disarmBtn { background: #666; }
+    #killBtn { background: #c22; color: #fff; }
+    #status {
+      font-weight: bold;
+    }
+    .small {
+      font-size: 0.8rem;
+      color: #aaa;
+    }
+    #txFrame {
+      font-family: monospace;
+      font-size: 0.8rem;
+      background: #000;
+      padding: 4px;
+      max-width: 360px;
+      overflow-x: auto;
+    }
+    #rxLog {
+      max-width: 360px;
+      max-height: 100px;
+      overflow-y: auto;
+      font-size: 0.8rem;
+      background: #000;
+      padding: 4px;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="panel">
+    <h2>Connection</h2>
+    <div id="status">Status: Disconnected</div>
+    <button id="connectBtn">Connect / Disconnect</button>
+    <div class="small">WS URL: ws://192.168.4.1:81/</div>
+    <div class="small">Make sure laptop is on Wi-Fi: ATmega_Controller</div>
+    <div>
+      <strong>Last TX frame:</strong>
+      <div id="txFrame"></div>
+    </div>
+    <div>
+      <strong>From flight controller:</strong>
+      <div id="rxLog"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Left Stick (Yaw + Throttle)</h2>
+      <label>
+        Throttle (CH3)
+        <input id="thrSlider" type="range" min="1000" max="2000" value="1000" />
+        <span id="thrVal">1000</span>
+      </label>
+      <label>
+        Yaw (CH4)
+        <input id="yawSlider" type="range" min="1000" max="2000" value="1500" />
+        <span id="yawVal">1500</span>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Right Stick (Roll + Pitch)</h2>
+      <label>
+        Roll (CH1)
+        <input id="rollSlider" type="range" min="1000" max="2000" value="1500" />
+        <span id="rollVal">1500</span>
+      </label>
+      <label>
+        Pitch (CH2)
+        <input id="pitchSlider" type="range" min="1000" max="2000" value="1500" />
+        <span id="pitchVal">1500</span>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Modes & Safety</h2>
+      <div>
+        ARM (CH5):<br/>
+        <button id="armBtn">ARM</button>
+        <button id="disarmBtn">DISARM</button>
+        <div class="small">ARM → 2000, DISARM → 1000</div>
+      </div>
+
+      <div style="margin-top:0.6rem;">
+        MODE (CH6):<br />
+        <button data-mode="1000">MODE1</button>
+        <button data-mode="1500">MODE2</button>
+        <button data-mode="2000">MODE3</button>
+      </div>
+
+      <div style="margin-top:0.8rem;">
+        <button id="killBtn">KILL</button>
+        <div class="small">Sends "KILL" once, sets THR=1000, ARM=1000.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PID PANEL -->
+  <div class="panel">
+    <h2>PID – ROLL</h2>
+    <label>
+      Kp:
+      <input id="rollKp" type="number" step="0.01" value="1.50">
+    </label>
+    <label>
+      Ki:
+      <input id="rollKi" type="number" step="0.001" value="0.03">
+    </label>
+    <label>
+      Kd:
+      <input id="rollKd" type="number" step="0.1" value="25.0">
+    </label>
+    <button id="sendRollPidBtn">Send ROLL PID (RC_PID)</button>
+    <div class="small">
+      Sends: <code>RC_PID,roll,pitch,yaw,thr,arm,mode,ROLL,Kp,Ki,Kd</code>
+    </div>
+  </div>
+
+  <script>
+    const WS_URL = "ws://192.168.4.1:81/";
+    let ws = null;
+
+    // Global RC channels (this is what we send)
+    let ch_roll  = 1500;
+    let ch_pitch = 1500;
+    let ch_yaw   = 1500;
+    let ch_thr   = 1000;
+    let ch_arm   = 1000;
+    let ch_mode  = 1000;
+
+    const statusEl = document.getElementById("status");
+    const txFrameEl = document.getElementById("txFrame");
+    const rxLogEl = document.getElementById("rxLog");
+
+    const rollSlider  = document.getElementById("rollSlider");
+    const pitchSlider = document.getElementById("pitchSlider");
+    const yawSlider   = document.getElementById("yawSlider");
+    const thrSlider   = document.getElementById("thrSlider");
+
+    const rollVal  = document.getElementById("rollVal");
+    const pitchVal = document.getElementById("pitchVal");
+    const yawVal   = document.getElementById("yawVal");
+    const thrVal   = document.getElementById("thrVal");
+
+    // PID inputs
+    const rollKpInput = document.getElementById("rollKp");
+    const rollKiInput = document.getElementById("rollKi");
+    const rollKdInput = document.getElementById("rollKd");
+    const sendRollPidBtn = document.getElementById("sendRollPidBtn");
+
+    function setStatus(text) {
+      statusEl.textContent = "Status: " + text;
+    }
+
+    // Slider events: ALWAYS update the global channel variables
+    rollSlider.addEventListener("input", () => {
+      ch_roll = parseInt(rollSlider.value, 10);
+      rollVal.textContent = ch_roll;
+    });
+    pitchSlider.addEventListener("input", () => {
+      ch_pitch = parseInt(pitchSlider.value, 10);
+      pitchVal.textContent = ch_pitch;
+    });
+    yawSlider.addEventListener("input", () => {
+      ch_yaw = parseInt(yawSlider.value, 10);
+      yawVal.textContent = ch_yaw;
+    });
+    thrSlider.addEventListener("input", () => {
+      ch_thr = parseInt(thrSlider.value, 10);
+      thrVal.textContent = ch_thr;
+    });
+
+    // Connect / disconnect button
+    document.getElementById("connectBtn").addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+        return;
+      }
+
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        setStatus("Connected");
+        console.log("WS connected");
+      };
+      ws.onclose = () => {
+        setStatus("Disconnected");
+        console.log("WS disconnected");
+      };
+      ws.onerror = (e) => {
+        setStatus("Error");
+        console.error("WS error", e);
+      };
+      ws.onmessage = (ev) => {
+        const msg = ev.data;
+        rxLogEl.textContent = msg + "\n" + rxLogEl.textContent;
+      };
+    });
+
+    // ARM / DISARM
+    document.getElementById("armBtn").addEventListener("click", () => {
+      ch_arm = 2000;
+    });
+    document.getElementById("disarmBtn").addEventListener("click", () => {
+      ch_arm = 1000;
+      ch_thr = 1000;
+      thrSlider.value = 1000;
+      thrVal.textContent = 1000;
+    });
+
+    // MODE buttons
+    document.querySelectorAll('button[data-mode]').forEach(btn => {
+      btn.addEventListener("click", () => {
+        ch_mode = parseInt(btn.getAttribute("data-mode"), 10);
+      });
+    });
+
+    // KILL button
+    document.getElementById("killBtn").addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send("KILL\n");
+      }
+      ch_arm = 1000;
+      ch_thr = 1000;
+      thrSlider.value = 1000;
+      thrVal.textContent = 1000;
+    });
+
+    // Periodically send RC frame (like an RC radio)
+    setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const frame = `RC,${ch_roll},${ch_pitch},${ch_yaw},${ch_thr},${ch_arm},${ch_mode}\n`;
+      txFrameEl.textContent = frame;
+      // Comment in if you want to see every frame in console:
+      // console.log("TX:", frame.trim());
+      ws.send(frame);
+    }, 20); // 20 ms ≈ 50 Hz
+
+    // Send PID + current RC in ONE packet when button is pressed
+    sendRollPidBtn.addEventListener("click", () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("WebSocket not connected");
+        return;
+      }
+
+      const kp = rollKpInput.value;
+      const ki = rollKiInput.value;
+      const kd = rollKdInput.value;
+
+      // Combined packet: RC + PID (same packet)
+      const cmd = `RC_PID,${ch_roll},${ch_pitch},${ch_yaw},${ch_thr},${ch_arm},${ch_mode},ROLL,${kp},${ki},${kd}\n`;
+      console.log("TX RC_PID:", cmd.trim());
+      ws.send(cmd);
+      txFrameEl.textContent = cmd;
+    });
+  </script>
+
+</body>
+</html>
